@@ -1,40 +1,97 @@
 import React, { useEffect, useState } from "react";
-import { getAccounts, getTransactions, getAnalytics } from "../api/plaidApi.ts";
-import { usePlaidLink } from "react-plaid-link";
+import { usePlaidLink, type PlaidLinkOptions, type PlaidLinkError } from "react-plaid-link";
+import { getAccounts, getTransactions, getAnalytics } from "../api/plaidApi";
 
-const HomePage = () => {
+type Card = {
+  account_id: string;
+  name: string;
+  balances: {
+    current: number;
+    limit?: number;
+  };
+};
+
+const HomePage: React.FC = () => {
   const user = JSON.parse(localStorage.getItem("user") || "{}");
 
-  const [cards, setCards] = useState([]);
-  const [tx, setTx] = useState([]);
-  const [analytics, setAnalytics] = useState(null);
+  const [cards, setCards] = useState<Card[]>([]);
+  const [tx, setTx] = useState<any[]>([]);
+  const [analytics, setAnalytics] = useState<any>(null);
 
-  // ----------- NEW: LINK TOKEN STATE -----------
-  const [linkToken, setLinkToken] = useState("");
+  // ----------- PLAID STATE -----------
+  const [linkToken, setLinkToken] = useState<string>("");
+  const [linkLoading, setLinkLoading] = useState<boolean>(false);
+  const [linkError, setLinkError] = useState<string | null>(null);
 
-  // Fetch Link Token
+  // ----------- FETCH LINK TOKEN -----------
   useEffect(() => {
-    fetch("/api/create_link_token")
-      .then((res) => res.json())
-      .then((data) => setLinkToken(data.link_token))
-      .catch(console.error);
+    const fetchLinkToken = async () => {
+      try {
+        setLinkLoading(true);
+
+        const res = await fetch("http://localhost:8080/create_link_token", {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            user_id: user.uid, // MUST be UUID
+          }),
+        });
+
+        if (!res.ok) {
+          throw new Error(`Failed to fetch link token (${res.status})`);
+        }
+
+        const data = await res.json();
+
+        if (!data.link_token) {
+          throw new Error("Missing link_token in response");
+        }
+
+        setLinkToken(data.link_token);
+      } catch (err: any) {
+        console.error(err);
+        setLinkError(err.message);
+      } finally {
+        setLinkLoading(false);
+      }
+    };
+
+    fetchLinkToken();
   }, []);
 
-  // Plaid Link handler
-  const { open, ready } = usePlaidLink({
-    token: linkToken,
-    onSuccess: async () => {
-      // Refresh accounts after linking
-      const updated = await getAccounts();
-      setCards(updated);
-    },
-  });
+  // ----------- PLAID CONFIG (TYPE SAFE) -----------
+  const plaidConfig: PlaidLinkOptions = {
+    token: linkToken, // empty string keeps ready=false
+    onSuccess: async (public_token: string) => {
+      try {
+        await fetch("http://localhost:8080/exchange_public_token", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          credentials: "include",
+          body: JSON.stringify({ public_token }),
+        });
 
-  const handleAddCard = () => {
-    if (ready) open();
+        const updated = await getAccounts();
+        setCards(updated);
+      } catch (err) {
+        console.error("Failed to exchange public token", err);
+      }
+    },
+    onExit: (err: PlaidLinkError | null) => {
+      if (err) {
+        console.error("Plaid exited with error", err);
+      }
+    },
   };
 
-  // ----------- FETCH DASHBOARD DATA -----------
+  const { open, ready } = usePlaidLink(plaidConfig);
+
+  // ----------- DASHBOARD DATA -----------
   useEffect(() => {
     getAccounts().then(setCards).catch(console.error);
 
@@ -45,16 +102,20 @@ const HomePage = () => {
     getAnalytics().then(setAnalytics).catch(console.error);
   }, []);
 
-  // ----------- LOGOUT FUNCTION -----------
+  // ----------- ACTIONS -----------
+  const handleAddCard = () => {
+    if (ready) open();
+  };
+
   const handleLogout = () => {
     localStorage.removeItem("loggedIn");
     localStorage.removeItem("user");
     window.location.href = "/login";
   };
 
+  // ----------- UI -----------
   return (
     <div style={{ marginTop: "60px", padding: "20px", maxWidth: "900px", margin: "0 auto" }}>
-
       {/* USER HEADER */}
       <div style={{ textAlign: "center", marginBottom: "40px" }}>
         <h1>Welcome, {user.name}!</h1>
@@ -62,22 +123,17 @@ const HomePage = () => {
 
         <button
           onClick={handleLogout}
-          style={{
-            marginTop: "20px",
-            padding: "10px 20px",
-            cursor: "pointer",
-          }}
+          style={{ marginTop: "20px", padding: "10px 20px", cursor: "pointer" }}
         >
           Logout
         </button>
       </div>
 
-      {/* CARDS PREVIEW */}
+      {/* CARDS */}
       <section style={{ marginBottom: "40px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <h2>Your Cards</h2>
 
-          {/* NEW ADD CARD BUTTON */}
           <button
             onClick={handleAddCard}
             disabled={!ready}
@@ -86,12 +142,19 @@ const HomePage = () => {
               borderRadius: "6px",
               border: "1px solid #333",
               background: "white",
-              cursor: "pointer",
+              cursor: ready ? "pointer" : "not-allowed",
+              opacity: ready ? 1 : 0.5,
             }}
           >
-            + Add Card
+            {linkLoading ? "Loading..." : "+ Add Card"}
           </button>
         </div>
+
+        {linkError && (
+          <p style={{ color: "red", marginTop: "10px" }}>
+            Failed to initialize Plaid: {linkError}
+          </p>
+        )}
 
         <div
           style={{
@@ -101,7 +164,7 @@ const HomePage = () => {
             marginTop: "10px",
           }}
         >
-          {cards.slice(0, 3).map((c: any) => (
+          {cards.slice(0, 3).map((c) => (
             <div
               key={c.account_id}
               style={{
@@ -119,23 +182,15 @@ const HomePage = () => {
         </div>
       </section>
 
-      {/* TRANSACTIONS PREVIEW */}
+      {/* TRANSACTIONS */}
       <section style={{ marginBottom: "40px" }}>
         <div style={{ display: "flex", justifyContent: "space-between" }}>
           <h2>Recent Transactions</h2>
           <a href="/transactions">See More</a>
         </div>
 
-        <div
-          style={{
-            marginTop: "10px",
-            background: "white",
-            padding: "20px",
-            borderRadius: "8px",
-            boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
-          }}
-        >
-          {tx.map((t: any) => (
+        <div style={{ marginTop: "10px", background: "white", padding: "20px", borderRadius: "8px" }}>
+          {tx.map((t) => (
             <div
               key={t.transaction_id}
               style={{
@@ -152,7 +207,7 @@ const HomePage = () => {
         </div>
       </section>
 
-      {/* ANALYTICS PREVIEW */}
+      {/* ANALYTICS */}
       <section style={{ marginBottom: "60px" }}>
         <div style={{ display: "flex", justifyContent: "space-between" }}>
           <h2>Analytics</h2>
@@ -160,15 +215,7 @@ const HomePage = () => {
         </div>
 
         {analytics && (
-          <div
-            style={{
-              marginTop: "10px",
-              background: "white",
-              padding: "20px",
-              borderRadius: "8px",
-              boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
-            }}
-          >
+          <div style={{ marginTop: "10px", background: "white", padding: "20px", borderRadius: "8px" }}>
             <p>Total last 30 days: ${analytics.total30}</p>
             <p>Top Category: {analytics.topCategory}</p>
           </div>
