@@ -1,14 +1,23 @@
 import React, { useEffect, useState } from "react";
-import { usePlaidLink, type PlaidLinkOptions, type PlaidLinkError } from "react-plaid-link";
+import {
+  usePlaidLink,
+  type PlaidLinkOptions,
+  type PlaidLinkError,
+} from "react-plaid-link";
 import { getAccounts, getTransactions, getAnalytics } from "../api/plaidApi";
 
+/**
+ * Matches YOUR backend response — not Plaid
+ */
 type Card = {
-  account_id: string;
-  name: string;
-  balances: {
-    current: number;
-    limit?: number;
-  };
+  Name: string;
+  OfficialName?: string;
+  Mask?: string;
+  Type: string;
+  Subtype?: string;
+  CurrentBalance?: number;
+  AvailableBalance?: number;
+  currency?: string;
 };
 
 const HomePage: React.FC = () => {
@@ -36,7 +45,7 @@ const HomePage: React.FC = () => {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            user_id: user.uid, // MUST be UUID
+            user_id: user.uid,
           }),
         });
 
@@ -60,11 +69,11 @@ const HomePage: React.FC = () => {
     };
 
     fetchLinkToken();
-  }, []);
+  }, [user.uid]);
 
-  // ----------- PLAID CONFIG (TYPE SAFE) -----------
+  // ----------- PLAID CONFIG -----------
   const plaidConfig: PlaidLinkOptions = {
-    token: linkToken, // empty string keeps ready=false
+    token: linkToken,
     onSuccess: async (public_token: string) => {
       try {
         await fetch("http://localhost:8080/exchange_public_token", {
@@ -73,10 +82,29 @@ const HomePage: React.FC = () => {
             "Content-Type": "application/json",
           },
           credentials: "include",
-          body: JSON.stringify({ public_token }),
+          body: JSON.stringify({
+            user_id: user.uid,
+            public_token,
+          }),
         });
 
-        const updated = await getAccounts();
+        // Refresh accounts after successful link
+        const res = await fetch(
+          `http://localhost:8080/accounts?userId=${user.uid}`,
+          {
+            method: "GET",
+            credentials: "include",
+            headers: {
+              "Content-Type": "application/json",
+            },
+          }
+        );
+
+        if (!res.ok) {
+          throw new Error("Failed to fetch accounts");
+        }
+
+        const updated = await res.json();
         setCards(updated);
       } catch (err) {
         console.error("Failed to exchange public token", err);
@@ -93,13 +121,40 @@ const HomePage: React.FC = () => {
 
   // ----------- DASHBOARD DATA -----------
   useEffect(() => {
-    getAccounts().then(setCards).catch(console.error);
+    const fetchDashboardData = async () => {
+      try {
+        // ---- ACCOUNTS ----
+        const accountsRes = await fetch(
+          `http://localhost:8080/accounts?userId=${user.uid}`,
+          {
+            method: "GET",
+            credentials: "include",
+            headers: {
+              "Content-Type": "application/json",
+            },
+          }
+        );
 
-    getTransactions()
-      .then((data) => setTx(data.slice(0, 5)))
-      .catch(console.error);
+        if (!accountsRes.ok) {
+          throw new Error("Failed to fetch accounts");
+        }
 
-    getAnalytics().then(setAnalytics).catch(console.error);
+        const accounts = await accountsRes.json();
+        setCards(accounts);
+
+        // ---- TRANSACTIONS ----
+        const transactions = await getTransactions();
+        setTx(transactions.slice(0, 5));
+
+        // ---- ANALYTICS ----
+        const analyticsData = await getAnalytics();
+        setAnalytics(analyticsData);
+      } catch (err) {
+        console.error("Failed to load dashboard data", err);
+      }
+    };
+
+    fetchDashboardData();
   }, []);
 
   // ----------- ACTIONS -----------
@@ -115,7 +170,14 @@ const HomePage: React.FC = () => {
 
   // ----------- UI -----------
   return (
-    <div style={{ marginTop: "60px", padding: "20px", maxWidth: "900px", margin: "0 auto" }}>
+    <div
+      style={{
+        marginTop: "60px",
+        padding: "20px",
+        maxWidth: "900px",
+        margin: "0 auto",
+      }}
+    >
       {/* USER HEADER */}
       <div style={{ textAlign: "center", marginBottom: "40px" }}>
         <h1>Welcome, {user.name}!</h1>
@@ -129,10 +191,16 @@ const HomePage: React.FC = () => {
         </button>
       </div>
 
-      {/* CARDS */}
+      {/* ACCOUNTS */}
       <section style={{ marginBottom: "40px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h2>Your Cards</h2>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+          }}
+        >
+          <h2>Your Accounts</h2>
 
           <button
             onClick={handleAddCard}
@@ -146,7 +214,7 @@ const HomePage: React.FC = () => {
               opacity: ready ? 1 : 0.5,
             }}
           >
-            {linkLoading ? "Loading..." : "+ Add Card"}
+            {linkLoading ? "Loading..." : "+ Add Account"}
           </button>
         </div>
 
@@ -164,9 +232,9 @@ const HomePage: React.FC = () => {
             marginTop: "10px",
           }}
         >
-          {cards.slice(0, 3).map((c) => (
+          {cards.map((c, idx) => (
             <div
-              key={c.account_id}
+              key={idx}
               style={{
                 padding: "20px",
                 borderRadius: "8px",
@@ -174,9 +242,18 @@ const HomePage: React.FC = () => {
                 background: "white",
               }}
             >
-              <h3>{c.name}</h3>
-              <p>Balance: ${c.balances.current}</p>
-              {c.balances.limit && <p>Limit: ${c.balances.limit}</p>}
+              <h3>{c.Name}</h3>
+              {c.Mask && <p>•••• {c.Mask}</p>}
+              <p>
+                Balance: ${c.CurrentBalance ?? 0} {c.currency ?? ""}
+              </p>
+              {c.AvailableBalance !== undefined && (
+                <p>Available: ${c.AvailableBalance}</p>
+              )}
+              <p style={{ color: "#666", fontSize: "14px" }}>
+                {c.Type}
+                {c.Subtype ? ` · ${c.Subtype}` : ""}
+              </p>
             </div>
           ))}
         </div>
@@ -189,7 +266,14 @@ const HomePage: React.FC = () => {
           <a href="/transactions">See More</a>
         </div>
 
-        <div style={{ marginTop: "10px", background: "white", padding: "20px", borderRadius: "8px" }}>
+        <div
+          style={{
+            marginTop: "10px",
+            background: "white",
+            padding: "20px",
+            borderRadius: "8px",
+          }}
+        >
           {tx.map((t) => (
             <div
               key={t.transaction_id}
@@ -215,7 +299,14 @@ const HomePage: React.FC = () => {
         </div>
 
         {analytics && (
-          <div style={{ marginTop: "10px", background: "white", padding: "20px", borderRadius: "8px" }}>
+          <div
+            style={{
+              marginTop: "10px",
+              background: "white",
+              padding: "20px",
+              borderRadius: "8px",
+            }}
+          >
             <p>Total last 30 days: ${analytics.total30}</p>
             <p>Top Category: {analytics.topCategory}</p>
           </div>
