@@ -4,7 +4,7 @@ import {
   type PlaidLinkOptions,
   type PlaidLinkError,
 } from "react-plaid-link";
-import { getAccounts, getTransactions, getAnalytics } from "../api/plaidApi";
+import {  getAnalytics } from "../api/plaidApi";
 
 /**
  * Matches YOUR backend response — not Plaid
@@ -143,8 +143,22 @@ const HomePage: React.FC = () => {
         setCards(accounts);
 
         // ---- TRANSACTIONS ----
-        const transactions = await getTransactions();
-        setTx(transactions.slice(0, 5));
+        const transactions = await fetch(
+          `http://localhost:8080/transactions?userId=${user.uid}`,
+          {
+            method: "GET",
+            credentials: "include",
+            headers: {
+              "Content-Type": "application/json",
+            },
+          }
+        );
+
+        if (!transactions.ok) {
+          throw new Error("Failed to fetch transactions");
+        }
+        const transactionsData = await transactions.json();
+        setTx(transactionsData.slice(0, 5));
 
         // ---- ANALYTICS ----
         const analyticsData = await getAnalytics();
